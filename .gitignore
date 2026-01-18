@@ -1,0 +1,63 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Google Cloud credentials (민감 정보)
+google-credentials.json
+*.json.txt
+
+# Database
+/data/database.sqlite
+/data/database.sqlite-shm
+/data/database.sqlite-wal
+/data/*.sqlite
+/data/*.sqlite-shm
+/data/*.sqlite-wal
+
+# Backup folders (로컬 데이터)
+/data/backup/*
+/data/failed/*
+/data/original/*
+/data/watch/*
+!/data/backup/.gitkeep
+!/data/failed/.gitkeep
+!/data/original/.gitkeep
+!/data/watch/.gitkeep
