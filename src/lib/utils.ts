@@ -36,6 +36,8 @@ export function getStatusColor(status: string): string {
       return 'bg-red-100 text-red-800';
     case 'skipped':
       return 'bg-gray-100 text-gray-800';
+    case 'existing':
+      return 'bg-purple-100 text-purple-800';
     default:
       return 'bg-gray-100 text-gray-800';
   }
@@ -53,6 +55,8 @@ export function getStatusText(status: string): string {
       return '실패';
     case 'skipped':
       return '건너뜀';
+    case 'existing':
+      return '기존 파일';
     default:
       return status;
   }

@@ -29,6 +29,7 @@ import {
   AlertCircle,
   Loader2,
   FolderOpen,
+  FileArchive,
 } from 'lucide-react';
 import { formatDate, getStatusColor, getStatusText } from '@/lib/utils';
 import type { UserSession, FileProcess, WatchFolder } from '@/types';
@@ -39,6 +40,7 @@ interface Stats {
   pendingFiles: number;
   processingFiles: number;
   failedFiles: number;
+  existingFiles: number;
   todayProcessed: number;
   queueStatus: {
     isProcessing: boolean;
@@ -256,6 +258,17 @@ export default function DashboardPage() {
                 </div>
               </CardContent>
             </Card>
+            <Card>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-gray-500">기존 파일</p>
+                    <p className="text-2xl font-bold text-purple-600">{stats.existingFiles}</p>
+                  </div>
+                  <FileArchive className="w-8 h-8 text-purple-400" />
+                </div>
+              </CardContent>
+            </Card>
           </div>
         )}
 
@@ -282,6 +295,7 @@ export default function DashboardPage() {
                 <option value="pending">대기 중</option>
                 <option value="processing">처리 중</option>
                 <option value="failed">실패</option>
+                <option value="existing">기존 파일</option>
               </select>
               <select
                 className="border border-gray-300 rounded-md px-3 py-2 text-sm"
@@ -364,7 +378,7 @@ export default function DashboardPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
-                          {file.status === 'completed' && (
+                          {(file.status === 'completed' || file.status === 'existing') && (
                             <>
                               <Button
                                 variant="ghost"
@@ -395,11 +409,11 @@ export default function DashboardPage() {
                               </Button>
                             </>
                           )}
-                          {file.status === 'failed' && (
+                          {(file.status === 'failed' || file.status === 'existing') && (
                             <Button
                               variant="ghost"
                               size="icon"
-                              title="재처리"
+                              title={file.status === 'existing' ? 'AI 처리' : '재처리'}
                               onClick={() => handleReprocess(file.id)}
                             >
                               <RotateCcw className="w-4 h-4" />

@@ -31,6 +31,7 @@ export async function GET() {
           pendingFiles: 0,
           processingFiles: 0,
           failedFiles: 0,
+          existingFiles: 0,
           todayProcessed: 0,
           queueStatus: getQueueStatus(),
           recentFiles: [],
@@ -59,6 +60,10 @@ export async function GET() {
     
     const failedFiles = db.prepare(`
       SELECT COUNT(*) as count FROM file_processes WHERE status = 'failed' ${folderCondition}
+    `).get() as { count: number };
+    
+    const existingFiles = db.prepare(`
+      SELECT COUNT(*) as count FROM file_processes WHERE status = 'existing' ${folderCondition}
     `).get() as { count: number };
     
     // 오늘 처리된 파일 수
@@ -105,6 +110,7 @@ export async function GET() {
         pendingFiles: pendingFiles.count,
         processingFiles: processingFiles.count,
         failedFiles: failedFiles.count,
+        existingFiles: existingFiles.count,
         todayProcessed: todayProcessed.count,
         queueStatus,
         recentFiles,

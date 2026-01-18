@@ -43,7 +43,7 @@ export interface FolderDeptMapping {
 }
 
 // 파일 처리 관련 타입
-export type ProcessStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'skipped';
+export type ProcessStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'skipped' | 'existing';
 
 export interface FileProcess {
   id: number;

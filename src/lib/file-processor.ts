@@ -198,7 +198,7 @@ async function moveToFailedFolder(filePath: string, fileProcessId: number) {
   }
 }
 
-// 수동 재처리
+// 수동 재처리 또는 기존 파일 처리
 export async function reprocessFile(fileProcessId: number): Promise<FileProcess> {
   const db = getDatabase();
   
@@ -208,39 +208,78 @@ export async function reprocessFile(fileProcessId: number): Promise<FileProcess>
     throw new Error('파일 처리 기록을 찾을 수 없습니다.');
   }
   
-  // 원본 폴더에서 파일 찾기
-  const originalDir = path.resolve(process.cwd(), ORIGINAL_FOLDER);
-  const files = fs.readdirSync(originalDir);
-  const matchingFile = files.find(f => f.includes(fileProcess.original_filename));
-  
-  if (!matchingFile) {
-    throw new Error('원본 백업 파일을 찾을 수 없습니다.');
-  }
-  
-  const originalPath = path.join(originalDir, matchingFile);
-  
-  // 상태 초기화
-  db.prepare(`
-    UPDATE file_processes 
-    SET status = 'pending', error_message = NULL, new_filename = NULL,
-        company_name = NULL, content_summary = NULL, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(fileProcessId);
-  
-  addLog(fileProcessId, 'REPROCESS', '재처리 시작');
-  
-  // 원본 파일을 감시 폴더로 복사
   const folder = db.prepare('SELECT * FROM watch_folders WHERE id = ?').get(fileProcess.folder_id) as { path: string } | undefined;
   
-  if (folder) {
-    const targetPath = path.join(folder.path, fileProcess.original_filename);
-    fs.copyFileSync(originalPath, targetPath);
-    
-    // 큐에 추가
-    addToQueue(targetPath, fileProcess.folder_id);
+  if (!folder) {
+    throw new Error('폴더 정보를 찾을 수 없습니다.');
   }
   
-  return db.prepare('SELECT * FROM file_processes WHERE id = ?').get(fileProcessId) as FileProcess;
+  let filePath: string;
+  
+  // 기존 파일(existing)인 경우 - 현재 위치에서 바로 처리
+  if (fileProcess.status === 'existing') {
+    const currentFilename = fileProcess.new_filename || fileProcess.original_filename;
+    filePath = path.join(folder.path, currentFilename);
+    
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`파일을 찾을 수 없습니다: ${currentFilename}`);
+    }
+    
+    // 상태 초기화 (기존 파일 처리용)
+    db.prepare(`
+      UPDATE file_processes 
+      SET status = 'pending', error_message = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(fileProcessId);
+    
+    addLog(fileProcessId, 'PROCESS_EXISTING', '기존 파일 AI 처리 시작');
+  } else {
+    // 실패한 파일 재처리 - 원본 백업에서 복원
+    const originalDir = path.resolve(process.cwd(), ORIGINAL_FOLDER);
+    
+    if (!fs.existsSync(originalDir)) {
+      throw new Error('원본 백업 폴더가 없습니다.');
+    }
+    
+    const files = fs.readdirSync(originalDir);
+    const matchingFile = files.find(f => f.includes(fileProcess.original_filename));
+    
+    if (!matchingFile) {
+      // 원본 백업이 없으면 현재 파일에서 시도
+      const currentFilename = fileProcess.new_filename || fileProcess.original_filename;
+      filePath = path.join(folder.path, currentFilename);
+      
+      if (!fs.existsSync(filePath)) {
+        throw new Error('원본 백업 파일을 찾을 수 없습니다.');
+      }
+    } else {
+      const backupPath = path.join(originalDir, matchingFile);
+      filePath = path.join(folder.path, fileProcess.original_filename);
+      fs.copyFileSync(backupPath, filePath);
+    }
+    
+    // 상태 초기화
+    db.prepare(`
+      UPDATE file_processes 
+      SET status = 'pending', error_message = NULL, new_filename = NULL,
+          company_name = NULL, content_summary = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(fileProcessId);
+    
+    addLog(fileProcessId, 'REPROCESS', '재처리 시작');
+  }
+  
+  // 기존 레코드 삭제 후 새로 처리
+  db.prepare('DELETE FROM file_processes WHERE id = ?').run(fileProcessId);
+  
+  // 큐에 추가
+  addToQueue(filePath, fileProcess.folder_id);
+  
+  return {
+    ...fileProcess,
+    status: 'pending',
+  };
 }
 
 // 파일명 수동 변경
