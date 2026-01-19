@@ -81,13 +81,13 @@ export async function GET(request: NextRequest) {
     // 페이지네이션
     const offset = ((filter.page || 1) - 1) * (filter.limit || 20);
     
-    // 파일 목록 조회
+    // 파일 목록 조회 (수정일 최신순)
     const files = db.prepare(`
       SELECT fp.*, wf.alias as folder_alias
       FROM file_processes fp
       LEFT JOIN watch_folders wf ON fp.folder_id = wf.id
       ${whereClause}
-      ORDER BY fp.created_at DESC
+      ORDER BY fp.updated_at DESC, fp.created_at DESC
       LIMIT ? OFFSET ?
     `).all(...params, filter.limit || 20, offset) as (FileProcess & { folder_alias: string })[];
     

@@ -3,7 +3,7 @@ import path from 'path';
 import { getDatabase, addLog, updateProcessingState } from './database';
 import { extractText } from './vision';
 import { analyzeDocument, generateUniqueFilename } from './gemini';
-import type { FileProcess, ProcessStatus } from '@/types';
+import type { FileProcess } from '@/types';
 
 const BACKUP_FOLDER = process.env.BACKUP_FOLDER || './data/backup';
 const FAILED_FOLDER = process.env.FAILED_FOLDER || './data/failed';
@@ -14,6 +14,7 @@ interface QueueItem {
   id: string;
   filePath: string;
   folderId: number;
+  existingRecordId?: number; // 기존 레코드 ID (재처리용)
   addedAt: Date;
 }
 
@@ -21,7 +22,7 @@ let processingQueue: QueueItem[] = [];
 let isProcessing = false;
 
 // 큐에 파일 추가
-export function addToQueue(filePath: string, folderId: number): string {
+export function addToQueue(filePath: string, folderId: number, existingRecordId?: number): string {
   const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   
   // 중복 체크
@@ -35,6 +36,7 @@ export function addToQueue(filePath: string, folderId: number): string {
     id,
     filePath,
     folderId,
+    existingRecordId,
     addedAt: new Date(),
   });
   
@@ -59,7 +61,7 @@ async function processQueue() {
     const item = processingQueue.shift()!;
     
     try {
-      await processFile(item.filePath, item.folderId);
+      await processFile(item.filePath, item.folderId, item.existingRecordId);
     } catch (error) {
       console.error('파일 처리 오류:', error);
     }
@@ -70,7 +72,7 @@ async function processQueue() {
 }
 
 // 단일 파일 처리
-export async function processFile(filePath: string, folderId: number): Promise<FileProcess> {
+export async function processFile(filePath: string, folderId: number, existingRecordId?: number): Promise<FileProcess> {
   const db = getDatabase();
   const filename = path.basename(filePath);
   
@@ -81,13 +83,23 @@ export async function processFile(filePath: string, folderId: number): Promise<F
     throw new Error(`파일을 찾을 수 없습니다: ${filePath}`);
   }
   
-  // DB에 처리 레코드 생성
-  const result = db.prepare(`
-    INSERT INTO file_processes (folder_id, original_path, original_filename, status)
-    VALUES (?, ?, ?, 'processing')
-  `).run(folderId, filePath, filename);
+  let fileProcessId: number;
   
-  const fileProcessId = result.lastInsertRowid as number;
+  // 기존 레코드가 있으면 업데이트, 없으면 새로 생성
+  if (existingRecordId) {
+    db.prepare(`
+      UPDATE file_processes 
+      SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(existingRecordId);
+    fileProcessId = existingRecordId;
+  } else {
+    const result = db.prepare(`
+      INSERT INTO file_processes (folder_id, original_path, original_filename, status)
+      VALUES (?, ?, ?, 'processing')
+    `).run(folderId, filePath, filename);
+    fileProcessId = result.lastInsertRowid as number;
+  }
   
   addLog(fileProcessId, 'START', `파일 처리 시작: ${filename}`);
   
@@ -125,10 +137,10 @@ export async function processFile(filePath: string, folderId: number): Promise<F
     // 6. DB 업데이트
     db.prepare(`
       UPDATE file_processes 
-      SET new_filename = ?, company_name = ?, content_summary = ?, ocr_text = ?,
+      SET original_path = ?, new_filename = ?, company_name = ?, content_summary = ?, ocr_text = ?,
           status = 'completed', processed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(newFilename, analysis.companyName, analysis.contentSummary, ocrText.substring(0, 10000), fileProcessId);
+    `).run(newFilePath, newFilename, analysis.companyName, analysis.contentSummary, ocrText.substring(0, 10000), fileProcessId);
     
     updateProcessingState(fileProcessId, false);
     
@@ -214,7 +226,7 @@ export async function reprocessFile(fileProcessId: number): Promise<FileProcess>
     throw new Error('폴더 정보를 찾을 수 없습니다.');
   }
   
-  let filePath: string;
+  let filePath: string = '';
   
   // 기존 파일(existing)인 경우 - 현재 위치에서 바로 처리
   if (fileProcess.status === 'existing') {
@@ -234,47 +246,52 @@ export async function reprocessFile(fileProcessId: number): Promise<FileProcess>
     `).run(fileProcessId);
     
     addLog(fileProcessId, 'PROCESS_EXISTING', '기존 파일 AI 처리 시작');
+    
+    // 큐에 추가 (기존 레코드 ID 전달)
+    addToQueue(filePath, fileProcess.folder_id, fileProcessId);
+    
   } else {
     // 실패한 파일 재처리 - 원본 백업에서 복원
     const originalDir = path.resolve(process.cwd(), ORIGINAL_FOLDER);
     
-    if (!fs.existsSync(originalDir)) {
-      throw new Error('원본 백업 폴더가 없습니다.');
+    // 원본 백업 폴더가 없어도 현재 파일에서 시도
+    let foundBackup = false;
+    
+    if (fs.existsSync(originalDir)) {
+      const files = fs.readdirSync(originalDir);
+      const matchingFile = files.find(f => f.includes(fileProcess.original_filename));
+      
+      if (matchingFile) {
+        const backupPath = path.join(originalDir, matchingFile);
+        filePath = path.join(folder.path, fileProcess.original_filename);
+        fs.copyFileSync(backupPath, filePath);
+        foundBackup = true;
+      }
     }
     
-    const files = fs.readdirSync(originalDir);
-    const matchingFile = files.find(f => f.includes(fileProcess.original_filename));
-    
-    if (!matchingFile) {
+    if (!foundBackup) {
       // 원본 백업이 없으면 현재 파일에서 시도
       const currentFilename = fileProcess.new_filename || fileProcess.original_filename;
       filePath = path.join(folder.path, currentFilename);
       
       if (!fs.existsSync(filePath)) {
-        throw new Error('원본 백업 파일을 찾을 수 없습니다.');
+        throw new Error(`파일을 찾을 수 없습니다: ${currentFilename}. 원본 백업도 없습니다.`);
       }
-    } else {
-      const backupPath = path.join(originalDir, matchingFile);
-      filePath = path.join(folder.path, fileProcess.original_filename);
-      fs.copyFileSync(backupPath, filePath);
     }
     
     // 상태 초기화
     db.prepare(`
       UPDATE file_processes 
-      SET status = 'pending', error_message = NULL, new_filename = NULL,
-          company_name = NULL, content_summary = NULL, updated_at = CURRENT_TIMESTAMP
+      SET status = 'pending', error_message = NULL,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(fileProcessId);
     
     addLog(fileProcessId, 'REPROCESS', '재처리 시작');
+    
+    // 큐에 추가 (기존 레코드 ID 전달)
+    addToQueue(filePath, fileProcess.folder_id, fileProcessId);
   }
-  
-  // 기존 레코드 삭제 후 새로 처리
-  db.prepare('DELETE FROM file_processes WHERE id = ?').run(fileProcessId);
-  
-  // 큐에 추가
-  addToQueue(filePath, fileProcess.folder_id);
   
   return {
     ...fileProcess,
@@ -318,9 +335,9 @@ export function manualRename(fileProcessId: number, newFilename: string): FilePr
   // DB 업데이트
   db.prepare(`
     UPDATE file_processes 
-    SET new_filename = ?, updated_at = CURRENT_TIMESTAMP
+    SET new_filename = ?, original_path = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(newFilename, fileProcessId);
+  `).run(newFilename, newPath, fileProcessId);
   
   addLog(fileProcessId, 'MANUAL_RENAME', `수동 파일명 변경: ${currentFilename} → ${newFilename}`);
   
@@ -365,7 +382,7 @@ export async function recoverPendingFiles() {
   for (const file of pendingFiles) {
     const filePath = path.join(file.folder_path, file.original_filename);
     if (fs.existsSync(filePath)) {
-      addToQueue(filePath, file.folder_id);
+      addToQueue(filePath, file.folder_id, file.id);
     } else {
       // 파일이 없으면 skipped로 변경
       db.prepare(`

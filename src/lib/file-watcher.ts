@@ -3,60 +3,14 @@ import path from 'path';
 import fs from 'fs';
 import { getDatabase, addLog } from './database';
 import { addToQueue, recoverPendingFiles } from './file-processor';
-import { testSMBConnection, getSMBAccessPath } from './smb-client';
 import type { WatchFolder } from '@/types';
 
 // 감시자 인스턴스들
 const watchers: Map<number, FSWatcher> = new Map();
 
-/**
- * SMB 폴더의 실제 접근 가능한 경로 가져오기
- */
-async function getAccessiblePath(folder: WatchFolder): Promise<{ success: boolean; path: string; error?: string }> {
-  // 로컬 폴더인 경우
-  if (folder.folder_type === 'local') {
-    return { success: true, path: folder.path };
-  }
-  
-  // SMB 폴더인 경우
-  if (folder.folder_type === 'smb' && folder.smb_host && folder.smb_share) {
-    // Windows에서 SMB 연결 테스트
-    const connectionResult = await testSMBConnection(
-      folder.smb_host,
-      folder.smb_share,
-      folder.smb_username || '',
-      folder.smb_password || ''
-    );
-    
-    if (!connectionResult.success) {
-      return { 
-        success: false, 
-        path: '', 
-        error: `SMB 연결 실패: ${connectionResult.error}` 
-      };
-    }
-    
-    // UNC 경로 반환
-    const uncPath = getSMBAccessPath(folder.smb_host, folder.smb_share);
-    return { success: true, path: uncPath };
-  }
-  
-  // path 필드 사용 (폴백)
-  return { success: true, path: folder.path };
-}
-
 // 기존 파일 스캔 및 DB 등록 (처리하지 않고 목록만 등록)
 export async function scanExistingFiles(folder: WatchFolder, processNewFiles: boolean = false): Promise<{ total: number; registered: number; skipped: number; error?: string }> {
-  // 접근 가능한 경로 가져오기
-  const pathResult = await getAccessiblePath(folder);
-  
-  if (!pathResult.success) {
-    console.error(`폴더 접근 실패: ${folder.alias} - ${pathResult.error}`);
-    addLog(null, 'SCAN_ERROR', `폴더 접근 실패: ${folder.alias}`, pathResult.error);
-    return { total: 0, registered: 0, skipped: 0, error: pathResult.error };
-  }
-  
-  const watchPath = pathResult.path;
+  const watchPath = folder.path;
   
   if (!fs.existsSync(watchPath)) {
     const errorMsg = `폴더가 존재하지 않습니다: ${watchPath}`;
@@ -145,7 +99,7 @@ export async function scanExistingFiles(folder: WatchFolder, processNewFiles: bo
   
   const pdfCount = files.filter(f => f.toLowerCase().endsWith('.pdf')).length;
   console.log(`폴더 스캔 완료: ${folder.alias} - 총 ${pdfCount}개 PDF, ${registered}개 등록, ${skipped}개 건너뜀`);
-  addLog(null, 'SCAN', `폴더 스캔: ${folder.alias} - ${registered}개 파일 등록 (${folder.folder_type === 'smb' ? 'SMB' : '로컬'})`);
+  addLog(null, 'SCAN', `폴더 스캔: ${folder.alias} - ${registered}개 파일 등록`);
   
   return { total: pdfCount, registered, skipped };
 }
@@ -157,17 +111,7 @@ export async function startWatching(folder: WatchFolder, scanExisting: boolean =
     return { success: true };
   }
   
-  // 접근 가능한 경로 가져오기
-  const pathResult = await getAccessiblePath(folder);
-  
-  if (!pathResult.success) {
-    const errorMsg = `폴더 접근 실패: ${pathResult.error}`;
-    console.error(errorMsg);
-    addLog(null, 'WATCH_ERROR', `폴더를 찾을 수 없음: ${folder.alias}`, pathResult.error);
-    return { success: false, error: pathResult.error };
-  }
-  
-  const watchPath = pathResult.path;
+  const watchPath = folder.path;
   
   // 경로 존재 확인
   if (!fs.existsSync(watchPath)) {
@@ -182,29 +126,27 @@ export async function startWatching(folder: WatchFolder, scanExisting: boolean =
     await scanExistingFiles(folder, false);
   }
   
-  console.log(`폴더 감시 시작: ${folder.alias} (${watchPath}) [${folder.folder_type}]`);
+  console.log(`폴더 감시 시작: ${folder.alias} (${watchPath})`);
   
   try {
     const watcher = chokidar.watch(watchPath, {
       persistent: true,
-      ignoreInitial: true, // 기존 파일은 위에서 스캔했으므로 무시
-      depth: 0, // 하위 폴더 제외
+      ignoreInitial: true,
+      depth: 0,
       awaitWriteFinish: {
-        stabilityThreshold: 2000, // 파일 쓰기 완료 대기 (2초)
+        stabilityThreshold: 2000,
         pollInterval: 100,
       },
-      // SMB 폴더의 경우 폴링 사용 (이벤트 감지 문제 방지)
-      usePolling: folder.folder_type === 'smb',
-      interval: folder.folder_type === 'smb' ? 5000 : undefined, // SMB는 5초마다 폴링
+      usePolling: true, // 네트워크 드라이브 호환성
+      interval: 3000, // 3초마다 폴링
       ignored: [
-        /(^|[\/\\])\../, // 숨김 파일 제외
-        /.*\.tmp$/i, // 임시 파일 제외
-        /.*\.part$/i, // 부분 파일 제외
+        /(^|[\/\\])\../,
+        /.*\.tmp$/i,
+        /.*\.part$/i,
       ],
     });
     
     watcher.on('add', (filePath) => {
-      // PDF 파일만 처리
       const ext = path.extname(filePath).toLowerCase();
       if (ext !== '.pdf') {
         return;
@@ -212,7 +154,6 @@ export async function startWatching(folder: WatchFolder, scanExisting: boolean =
       
       const filename = path.basename(filePath);
       
-      // 이미 DB에 있는지 확인
       const db = getDatabase();
       const existingProcess = db.prepare(`
         SELECT id FROM file_processes 
@@ -227,7 +168,6 @@ export async function startWatching(folder: WatchFolder, scanExisting: boolean =
       console.log(`새 PDF 파일 감지: ${filename}`);
       addLog(null, 'FILE_DETECTED', `새 파일 감지: ${filename}`, filePath);
       
-      // 큐에 추가
       addToQueue(filePath, folder.id);
     });
     
@@ -239,7 +179,7 @@ export async function startWatching(folder: WatchFolder, scanExisting: boolean =
     
     watcher.on('ready', () => {
       console.log(`폴더 감시 준비 완료: ${folder.alias}`);
-      addLog(null, 'WATCH_READY', `폴더 감시 시작: ${folder.alias} (${folder.folder_type === 'smb' ? 'SMB' : '로컬'})`);
+      addLog(null, 'WATCH_READY', `폴더 감시 시작: ${folder.alias}`);
     });
     
     watchers.set(folder.id, watcher);
@@ -292,7 +232,6 @@ export async function startAllWatchers() {
     });
   }
   
-  // 미처리 파일 복구
   recoverPendingFiles();
   
   return results;
@@ -309,13 +248,11 @@ export function setupLocalTestFolder() {
   
   const watchPath = path.resolve(process.cwd(), localWatchFolder);
   
-  // 폴더 생성
   if (!fs.existsSync(watchPath)) {
     fs.mkdirSync(watchPath, { recursive: true });
     console.log(`로컬 테스트 폴더 생성: ${watchPath}`);
   }
   
-  // DB에 폴더 등록 (없으면)
   const db = getDatabase();
   const existingFolder = db.prepare(`
     SELECT id FROM watch_folders WHERE path = ?
@@ -352,13 +289,10 @@ export function getWatcherStatus() {
 export async function initializeFileWatcher() {
   console.log('파일 감시 시스템 초기화...');
   
-  // 로컬 테스트 폴더 설정
   setupLocalTestFolder();
   
-  // 모든 활성 폴더 감시 시작
   const results = await startAllWatchers();
   
-  // 결과 로깅
   const successCount = results.filter(r => r.success).length;
   const failCount = results.filter(r => !r.success).length;
   
